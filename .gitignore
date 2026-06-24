@@ -1,0 +1,11 @@
+# Arquivos locais
+.DS_Store
+.env
+*.log
+
+# Pastas temporárias
+tmp/
+cache/
+
+# Docker local
+docker-compose.override.yml
