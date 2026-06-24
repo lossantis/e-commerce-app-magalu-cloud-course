@@ -1,0 +1,108 @@
+name: Deploy manual para Magalu Cloud
+
+# Este bloco define quando o workflow vai rodar.
+# Como só temos workflow_dispatch, ele NÃO roda automaticamente no git push.
+# Ele só roda quando você clicar no botão "Run workflow" no GitHub.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch que será publicada"
+        required: true
+        default: "main"
+
+# Variáveis usadas no workflow.
+env:
+  # Endereço do Container Registry da Magalu Cloud.
+  REGISTRY_HOST: container-registry.br-se1.magalu.cloud
+
+  # Nome do registry que você criou na Magalu.
+  REGISTRY_NAME: hugo-container-bash-e-commerce
+
+  # Nome da imagem dentro do registry.
+  IMAGE_NAME: bash-commerce
+
+  # Tag da imagem.
+  IMAGE_TAG: prod
+
+  # Nome do container rodando na VM.
+  CONTAINER_NAME: bash-commerce
+
+jobs:
+  deploy:
+    name: Build, Push e Deploy na VM
+    runs-on: ubuntu-latest
+
+    steps:
+      # Baixa o código do repositório GitHub.
+      # Ele vai baixar a branch escolhida no botão "Run workflow".
+      - name: Baixar código da branch escolhida
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      # Faz login no Container Registry da Magalu.
+      # Usamos --password-stdin para não expor a senha no comando.
+      # Esse formato é recomendado pelo Docker para login não interativo.
+      - name: Login no Container Registry da Magalu
+        run: |
+          echo "${{ secrets.MAGALU_REGISTRY_PASSWORD }}" | docker login $REGISTRY_HOST \
+            --username "${{ secrets.MAGALU_REGISTRY_USERNAME }}" \
+            --password-stdin
+
+      # Monta o nome completo da imagem.
+      # Exemplo final:
+      # container-registry.br-se1.magalu.cloud/hugo-container-bash-e-commerce/bash-commerce:prod
+      - name: Definir nome completo da imagem
+        run: |
+          echo "FULL_IMAGE_NAME=$REGISTRY_HOST/$REGISTRY_NAME/$IMAGE_NAME:$IMAGE_TAG" >> $GITHUB_ENV
+
+      # Faz o build da imagem usando o Dockerfile do seu projeto.
+      # Todos os arquivos novos versionados no Git entram no build,
+      # exceto os que estiverem ignorados no .dockerignore.
+      - name: Build da imagem Docker
+        run: |
+          docker build -t $FULL_IMAGE_NAME .
+
+      # Envia a imagem nova para o Container Registry da Magalu.
+      - name: Push da imagem para Magalu Cloud
+        run: |
+          docker push $FULL_IMAGE_NAME
+
+      # Acessa a VM por SSH e atualiza o container.
+      # A Action appleboy/ssh-action executa comandos remotos via SSH.
+      - name: Deploy na VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            # Para a execução se algum comando falhar.
+            set -e
+
+            # Nome completo da imagem que foi enviada ao registry.
+            FULL_IMAGE_NAME="${{ env.REGISTRY_HOST }}/${{ env.REGISTRY_NAME }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+
+            # Login no registry dentro da VM.
+            # A VM precisa estar autenticada para conseguir fazer docker pull.
+            echo "${{ secrets.MAGALU_REGISTRY_PASSWORD }}" | sudo docker login ${{ env.REGISTRY_HOST }} \
+              --username "${{ secrets.MAGALU_REGISTRY_USERNAME }}" \
+              --password-stdin
+
+            # Baixa a imagem nova.
+            sudo docker pull "$FULL_IMAGE_NAME"
+
+            # Remove o container antigo, se existir.
+            sudo docker rm -f ${{ env.CONTAINER_NAME }} || true
+
+            # Sobe o container novo.
+            # Aqui estou assumindo que sua aplicação escuta na porta 80 dentro do container.
+            sudo docker run -d \
+              --name ${{ env.CONTAINER_NAME }} \
+              --restart unless-stopped \
+              -p 80:80 \
+              "$FULL_IMAGE_NAME"
+
+            # Mostra o container rodando.
+            sudo docker ps
